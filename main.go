@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
+	// "errors"
 	"log"
 	"net"
 	"net/http"
@@ -22,11 +22,7 @@ func main() {
 
 func run() error {
 
-	if len(os.Args) < 2 {
-		return errors.New("address required to listen")
-	}
-
-	l, err := net.Listen("tcp", os.Args[1])
+	l, err := net.Listen("tcp", "localhost:42069")
 	if err != nil {
 		return err
 	}
