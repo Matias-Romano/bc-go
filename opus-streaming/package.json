@@ -1,0 +1,16 @@
+{
+  "name": "opus-streaming",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "opus-decoder": "^0.7.10",
+    "vite": "^7.0.5"
+  }
+}

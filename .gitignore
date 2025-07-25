@@ -1,2 +1,4 @@
+opus-streaming/node_modules/*
+dist/*
 tmp/*
 *.wav

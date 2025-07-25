@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -16,7 +16,7 @@ import (
 )
 
 type streamer struct {
-	streamBuffer int
+	streamPacketSize int
 
 	//function for logs, default log.Printf
 	logf func(f string, v ...interface{})
@@ -39,11 +39,10 @@ type stream struct {
 
 func newStreamer() *streamer {
 	stm := &streamer{
-		// TODO: update to 96k after opus impl
-		streamBuffer: 16,
-		logf:         log.Printf,
-		streams:      make(map[*stream]struct{}),
-		playLimiter:  rate.NewLimiter(rate.Every(time.Millisecond*100), 8),
+		streamPacketSize: 512,
+		logf:             log.Printf,
+		streams:          make(map[*stream]struct{}),
+		playLimiter:      rate.NewLimiter(rate.Every(time.Millisecond*100), 8),
 	}
 	stm.serveMux.Handle("/", http.FileServer(http.Dir(".")))
 	stm.serveMux.HandleFunc("/play", stm.playHandler)
@@ -103,6 +102,7 @@ func (stm *streamer) stream(w http.ResponseWriter, r *http.Request) error {
 	defer c.CloseNow()
 
 	ctx := c.CloseRead(context.Background())
+	stm.startStreaming(s)
 
 	for {
 		select {
@@ -119,12 +119,14 @@ func (stm *streamer) stream(w http.ResponseWriter, r *http.Request) error {
 
 func (stm *streamer) openStream(s *stream) {
 	stm.streamsMu.Lock()
+	stm.logf("stream opened")
 	stm.streams[s] = struct{}{}
 	stm.streamsMu.Unlock()
 }
 
 func (stm *streamer) closeStream(s *stream) {
 	stm.streamsMu.Lock()
+	stm.logf("stream closed")
 	delete(stm.streams, s)
 	stm.streamsMu.Unlock()
 }
@@ -137,23 +139,50 @@ func writeTimeout(ctx context.Context, timeout time.Duration, c *websocket.Conn,
 }
 
 func (stm *streamer) startStreaming(s *stream) error {
+	var err error
+	reader, writer := io.Pipe()
+
 	stm.streamsMu.Lock()
 	defer stm.streamsMu.Unlock()
 
 	stm.playLimiter.Wait(context.Background())
 
-	opusBuffer, err := stm.getOpusBuffer()
-	packetSize := 64
+	go func() {
+		defer close(s.buffer)
+		defer reader.Close() // Cerrar el reader al terminar
+
+		buf := make([]byte, stm.streamPacketSize)
+		for {
+			n, errReader := reader.Read(buf)
+			if errReader == io.EOF {
+				// Si hay datos pendientes antes del EOF, enviarlos
+				if n > 0 {
+					s.buffer <- buf[:n]
+				}
+				break
+			}
+			if errReader != nil {
+				stm.logf("Error when reading pipe: %v\n", errReader)
+				err = errReader
+				break
+			}
+			if n > 0 {
+				stm.logf("data is being sent!")
+				// Enviar el fragmento leído al canal
+				s.buffer <- append([]byte{}, buf[:n]...) // Copia para evitar reutilización del buffer
+			}
+		}
+	}()
 
 	go func() {
-		defer close(s.buffer) // Cerrar el canal al terminar
-		for i := 0; i < len(opusBuffer); i += packetSize {
-			end := i + packetSize
-			if end > len(opusBuffer) {
-				end = len(opusBuffer) // Ajustar el final para el último fragmento
-			}
-			// Enviar el fragmento al canal
-			s.buffer <- opusBuffer[i:end]
+		defer writer.Close() // Cerrar el writer al terminar
+		errWriter := ffmpeg_go.Input("test.wav").
+			Output("pipe:", ffmpeg_go.KwArgs{"c:a": "libopus", "f": "opus", "b:a": "96k"}).
+			WithOutput(writer).
+			Run()
+		if errWriter != nil {
+			stm.logf("Error in FFmpeg: %v\n", errWriter)
+			err = errWriter
 		}
 	}()
 
@@ -161,20 +190,4 @@ func (stm *streamer) startStreaming(s *stream) error {
 		return err
 	}
 	return nil
-}
-
-func (stm *streamer) getOpusBuffer() ([]byte, error) {
-	// Crear un buffer para capturar la salida
-	var buf bytes.Buffer
-
-	// Configurar el flujo de FFmpeg
-	err := ffmpeg_go.Input("input.wav").
-		Output("pipe:", ffmpeg_go.KwArgs{"c:a": "libopus", "f": "opus"}).
-		WithOutput(&buf). // Redirigir la salida al buffer
-		Run()
-	if err != nil {
-		stm.logf("Error al convertir el archivo: %v\n", err)
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }
